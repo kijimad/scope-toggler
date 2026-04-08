@@ -55,13 +55,16 @@ Like [vterm-toggle](https://github.com/jixiuf/vterm-toggle), but generalized —
 
 ```elisp
 (scope-toggler-define "agent-shell"
-  :find-buffer (lambda (_root)
-                 (seq-first (agent-shell-project-buffers)))
+  :find-buffer (lambda (root)
+                 (seq-first
+                  (seq-filter
+                   (lambda (buf)
+                     (string= (expand-file-name root)
+                              (expand-file-name
+                               (buffer-local-value 'default-directory buf))))
+                   (agent-shell-buffers))))
   :create (lambda (root)
-            (let ((default-directory root)
-                  (agent-shell-context-sources nil))
-              (agent-shell)
-              (seq-first (agent-shell-project-buffers)))))
+            (agent-shell--new-shell :location root)))
 
 (scope-toggler-make-command my/toggle-agent-shell "agent-shell")
 (global-set-key (kbd "<muhenkan>") #'my/toggle-agent-shell)
