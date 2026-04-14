@@ -11,30 +11,37 @@
 (defmacro scope-toggler-test--with-projects (&rest body)
   "Create two temp projects with .git dirs, run BODY, then clean up."
   `(let ((scope-toggler-test--project-a (make-temp-file "st-project-a-" t))
-         (scope-toggler-test--project-b (make-temp-file "st-project-b-" t)))
+         (scope-toggler-test--project-b (make-temp-file "st-project-b-" t))
+         (scope-toggler--active-window nil))
      (unwind-protect
          (progn
            (make-directory (expand-file-name ".git" scope-toggler-test--project-a) t)
            (make-directory (expand-file-name ".git" scope-toggler-test--project-b) t)
            (clrhash scope-toggler--scopes)
            ,@body)
-       ;; Cleanup
        (clrhash scope-toggler--scopes)
-       (dolist (buf (buffer-list))
-         (when (string-match-p "\\*test-scope<" (buffer-name buf))
-           (kill-buffer buf)))
+       (scope-toggler-test--kill-test-buffers)
        (delete-directory scope-toggler-test--project-a t)
        (delete-directory scope-toggler-test--project-b t))))
+
+(defun scope-toggler-test--kill-test-buffers ()
+  "Kill all test scope buffers."
+  (dolist (buf (buffer-list))
+    (when (string-match-p "\\*\\(test-scope\\|scope-[ab]\\)<" (buffer-name buf))
+      (kill-buffer buf))))
+
+(defun scope-toggler-test--make-create-fn (scope-name)
+  "Return a :create function for SCOPE-NAME."
+  (lambda (root)
+    (let ((buf (generate-new-buffer
+                (scope-toggler--buffer-name scope-name root))))
+      (with-current-buffer buf (setq default-directory root))
+      buf)))
 
 (defun scope-toggler-test--define-test-scope ()
   "Register a simple test scope using plain buffers."
   (scope-toggler-define "test-scope"
-    :create (lambda (root)
-              (let ((buf (generate-new-buffer
-                          (scope-toggler--buffer-name "test-scope" root))))
-                (with-current-buffer buf
-                  (setq default-directory root))
-                buf))))
+    :create (scope-toggler-test--make-create-fn "test-scope")))
 
 ;;; Tests
 
@@ -97,10 +104,10 @@
      (let* ((buf-name (scope-toggler--buffer-name "test-scope"
                                                    (scope-toggler--project-root)))
             (buf (get-buffer buf-name)))
-       (should (get-buffer-window buf t))
+       (should (get-buffer-window buf))
        ;; Hide
        (scope-toggler-toggle "test-scope")
-       (should-not (get-buffer-window buf t))
+       (should-not (get-buffer-window buf))
        ;; Buffer still alive
        (should (buffer-live-p buf))))))
 
@@ -118,7 +125,7 @@
      (let* ((buf-name (scope-toggler--buffer-name "test-scope"
                                                    (scope-toggler--project-root)))
             (buf (get-buffer buf-name)))
-       (should (get-buffer-window buf t))))))
+       (should (get-buffer-window buf))))))
 
 (ert-deftest scope-toggler-test-separate-projects ()
   "Different projects get separate buffers."
@@ -155,26 +162,21 @@
      (let ((default-directory root-a))
        ;; Should find custom-buf via :find-buffer, not call :create
        (scope-toggler-toggle "test-scope")
-       (should (get-buffer-window custom-buf t)))
+       (should (get-buffer-window custom-buf)))
      (kill-buffer custom-buf))))
 
 (ert-deftest scope-toggler-test-window-height ()
   "Custom :window-height is respected."
   (scope-toggler-test--with-projects
    (scope-toggler-define "test-scope"
-     :create (lambda (root)
-               (let ((buf (generate-new-buffer
-                           (scope-toggler--buffer-name "test-scope" root))))
-                 (with-current-buffer buf
-                   (setq default-directory root))
-                 buf))
+     :create (scope-toggler-test--make-create-fn "test-scope")
      :window-height 0.5)
    (let ((default-directory (file-name-as-directory scope-toggler-test--project-a)))
      (scope-toggler-toggle "test-scope")
      (let* ((buf-name (scope-toggler--buffer-name "test-scope"
                                                    (scope-toggler--project-root)))
             (buf (get-buffer buf-name))
-            (win (get-buffer-window buf t)))
+            (win (get-buffer-window buf)))
        (should win)))))
 
 (ert-deftest scope-toggler-test-make-command ()
@@ -184,15 +186,59 @@
   (scope-toggler-make-command scope-toggler-test--cmd "test-scope")
   (should (fboundp 'scope-toggler-test--cmd))
   (clrhash scope-toggler--scopes)
-  (dolist (buf (buffer-list))
-    (when (string-match-p "\\*test-scope<" (buffer-name buf))
-      (kill-buffer buf))))
+  (scope-toggler-test--kill-test-buffers))
 
 (ert-deftest scope-toggler-test-unknown-scope-error ()
   "Toggling an unknown scope signals an error."
   (clrhash scope-toggler--scopes)
   (should-error (scope-toggler-toggle "nonexistent")
                 :type 'user-error))
+
+(ert-deftest scope-toggler-test-shared-side-window ()
+  "Toggling a different scope replaces the current one in the same side window."
+  (scope-toggler-test--with-projects
+   (scope-toggler-define "scope-a" :create (scope-toggler-test--make-create-fn "scope-a"))
+   (scope-toggler-define "scope-b" :create (scope-toggler-test--make-create-fn "scope-b"))
+   (let* ((root (file-name-as-directory scope-toggler-test--project-a))
+          (default-directory root)
+          (name-a (scope-toggler--buffer-name "scope-a" root))
+          (name-b (scope-toggler--buffer-name "scope-b" root)))
+     ;; Show scope-a
+     (scope-toggler-toggle "scope-a")
+     (let ((buf-a (get-buffer name-a)))
+       (should (get-buffer-window buf-a))
+       ;; Toggle scope-b -> should replace scope-a in the same window
+       (scope-toggler-toggle "scope-b")
+       (let ((buf-b (get-buffer name-b)))
+         ;; scope-b is visible
+         (should (get-buffer-window buf-b))
+         ;; scope-a is no longer visible (replaced, not stacked)
+         (should-not (get-buffer-window buf-a))
+         ;; Only one side window
+         (should (= 1 (length (seq-filter
+                               (lambda (w)
+                                 (window-parameter w 'window-side))
+                               (window-list))))))))))
+
+(ert-deftest scope-toggler-test-hide-after-replace ()
+  "Toggling the visible scope after replacement hides the side window."
+  (scope-toggler-test--with-projects
+   (scope-toggler-define "scope-a" :create (scope-toggler-test--make-create-fn "scope-a"))
+   (scope-toggler-define "scope-b" :create (scope-toggler-test--make-create-fn "scope-b"))
+   (let* ((root (file-name-as-directory scope-toggler-test--project-a))
+          (default-directory root)
+          (name-b (scope-toggler--buffer-name "scope-b" root)))
+     ;; Show scope-a, then replace with scope-b
+     (scope-toggler-toggle "scope-a")
+     (scope-toggler-toggle "scope-b")
+     ;; Toggle scope-b again -> hide
+     (scope-toggler-toggle "scope-b")
+     (should-not (get-buffer-window (get-buffer name-b)))
+     ;; No side windows left
+     (should (null (seq-filter
+                    (lambda (w)
+                      (window-parameter w 'window-side))
+                    (window-list)))))))
 
 (provide 'scope-toggler-test)
 ;;; scope-toggler-test.el ends here

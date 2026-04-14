@@ -41,6 +41,8 @@
 
 (defvar scope-toggler--scopes (make-hash-table :test 'equal))
 (defvar scope-toggler--previous-window nil)
+(defvar scope-toggler--active-window nil
+  "The current side window used by scope-toggler, shared across all scopes.")
 
 (defun scope-toggler--project-root ()
   "Find project root by searching upward for `scope-toggler-project-markers'."
@@ -56,6 +58,27 @@
   (format "*%s<%s>*"
           scope-name
           (file-name-nondirectory (directory-file-name project-root))))
+
+(defun scope-toggler--create (create-fn project-root)
+  "Call CREATE-FN with PROJECT-ROOT, restoring current window's buffer if hijacked."
+  (let ((orig-win (selected-window))
+        (orig-buf (current-buffer)))
+    (let ((new-buf (funcall create-fn project-root)))
+      (when (and new-buf
+                 (window-live-p orig-win)
+                 (not (eq orig-buf new-buf))
+                 (eq (window-buffer orig-win) new-buf))
+        (set-window-buffer orig-win orig-buf))
+      new-buf)))
+
+(defun scope-toggler--show (buf display-action)
+  "Show BUF in a side window using DISPLAY-ACTION, track state, and select it."
+  (unless (eq (selected-window) scope-toggler--active-window)
+    (setq scope-toggler--previous-window (selected-window)))
+  (let ((w (display-buffer buf display-action)))
+    (when w
+      (setq scope-toggler--active-window w)
+      (select-window w))))
 
 ;;;###autoload
 (defun scope-toggler-define (name &rest props)
@@ -73,19 +96,19 @@
    (list (completing-read "Scope: "
                           (hash-table-keys scope-toggler--scopes) nil t)))
   (let* ((scope (gethash scope-name scope-toggler--scopes))
+         (_ (unless scope (user-error "Unknown scope: %s" scope-name)))
          (project-root (scope-toggler--project-root))
          (default-directory project-root)
          (find-fn (plist-get scope :find-buffer))
+         (create-fn (plist-get scope :create))
          (buf (if find-fn
                   (funcall find-fn project-root)
                 (get-buffer (scope-toggler--buffer-name scope-name project-root))))
-         (win (and buf (get-buffer-window buf t)))
+         (win (and buf (get-buffer-window buf)))
          (height (or (plist-get scope :window-height)
                      scope-toggler-default-window-height))
          (display-action `(display-buffer-in-side-window
                            (side . bottom) (window-height . ,height))))
-    (unless scope
-      (user-error "Unknown scope: %s" scope-name))
     (cond
      ;; Visible -> hide
      ((and win (window-live-p win))
@@ -93,19 +116,13 @@
         (when (and scope-toggler--previous-window
                    (window-live-p scope-toggler--previous-window))
           (select-window scope-toggler--previous-window)))
-      (delete-window win))
-     ;; Exists but hidden -> show
-     (buf
-      (setq scope-toggler--previous-window (selected-window))
-      (let ((w (display-buffer buf display-action)))
-        (when w (select-window w))))
-     ;; No buffer -> create and show
+      (delete-window win)
+      (setq scope-toggler--active-window nil))
+     ;; Not visible -> get or create buffer, show in side window
      (t
-      (setq scope-toggler--previous-window (selected-window))
-      (let ((new-buf (funcall (plist-get scope :create) project-root)))
-        (when (and new-buf (buffer-live-p new-buf))
-          (let ((w (display-buffer new-buf display-action)))
-            (when w (select-window w)))))))))
+      (let ((target (or buf (scope-toggler--create create-fn project-root))))
+        (when (and target (buffer-live-p target))
+          (scope-toggler--show target display-action)))))))
 
 ;;;###autoload
 (defmacro scope-toggler-make-command (command-name scope-name)

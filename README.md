@@ -34,7 +34,7 @@ Like [vterm-toggle](https://github.com/jixiuf/vterm-toggle), but generalized —
                 (current-buffer)))))
 
 (scope-toggler-make-command my/toggle-eshell "eshell")
-(global-set-key (kbd "C-`") #'my/toggle-eshell)
+(global-set-key (kbd "C-M-;") #'my/toggle-eshell)
 ```
 
 ### vterm
@@ -48,26 +48,36 @@ Like [vterm-toggle](https://github.com/jixiuf/vterm-toggle), but generalized —
                               (directory-file-name root)))))))
 
 (scope-toggler-make-command my/toggle-vterm "vterm")
-(global-set-key (kbd "C-`") #'my/toggle-vterm)
+(global-set-key (kbd "C-M-:") #'my/toggle-vterm)
 ```
 
 ### agent-shell
 
 ```elisp
-(scope-toggler-define "agent-shell"
-  :find-buffer (lambda (root)
+  (scope-toggler-define "agent-shell"
+   :find-buffer (lambda (root)
                  (seq-first
                   (seq-filter
                    (lambda (buf)
-                     (string= (expand-file-name root)
-                              (expand-file-name
-                               (buffer-local-value 'default-directory buf))))
-                   (agent-shell-buffers))))
-  :create (lambda (root)
-            (agent-shell--new-shell :location root)))
+                    (string= (expand-file-name root)
+                     (expand-file-name
+                      (buffer-local-value 'default-directory buf))))
+                         (agent-shell-buffers))))
+        :create (lambda (root)
+                  (let* ((default-directory root)
+                         (buf (agent-shell--start
+                               :config (or (agent-shell--resolve-preferred-config)
+                                           (agent-shell-select-config
+                                            :prompt "Start new agent: ")
+                                           (error "No agent config found")))))
+                    (when current-prefix-arg
+                      (with-current-buffer buf
+                        (setq-local agent-shell-permission-responder-function
+                    #'agent-shell-permission-allow-always)))
+                    buf)))
 
 (scope-toggler-make-command my/toggle-agent-shell "agent-shell")
-(global-set-key (kbd "<muhenkan>") #'my/toggle-agent-shell)
+(global-set-key (kbd "C-M-@") #'my/toggle-agent-shell)
 ```
 
 ## API
